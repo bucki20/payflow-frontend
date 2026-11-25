@@ -2,8 +2,7 @@ import { createHash } from "node:crypto";
 import { readdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-
-const CSP_MARKER = "__PAYFLOW_SCRIPT_HASHES__";
+import { getCspConnectSources } from "./csp-config.mjs";
 
 export function withInlineScriptHashes(html) {
   const hashes = new Set();
@@ -17,11 +16,24 @@ export function withInlineScriptHashes(html) {
     hashes.add(`'sha256-${digest}'`);
   }
 
-  if (!html.includes(CSP_MARKER)) {
-    throw new Error("CSP hash marker was not found in exported HTML.");
+  const cspContent = [
+    "default-src 'self'",
+    "base-uri 'self'",
+    "object-src 'none'",
+    "form-action 'self'",
+    "img-src 'self' data: blob: https://*.walletconnect.com https://*.walletconnect.org",
+    "font-src 'self' data:",
+    "style-src 'self' 'unsafe-inline'",
+    `connect-src 'self' ${getCspConnectSources(process.env).join(" ")}`,
+    "frame-src 'self' https://verify.walletconnect.com",
+    `script-src 'self' ${[...hashes].join(" ")}`,
+  ].join("; ");
+  const cspMeta = `<meta http-equiv="Content-Security-Policy" content="${cspContent.replaceAll("&", "&amp;").replaceAll('"', "&quot;")}">`;
+  const headTag = /<head\b[^>]*>/i;
+  if (!headTag.test(html)) {
+    throw new Error("Could not find the document head for the CSP meta tag.");
   }
-
-  return html.replaceAll(CSP_MARKER, [...hashes].join(" "));
+  return html.replace(headTag, (head) => `${head}${cspMeta}`);
 }
 
 async function visitHtml(directory) {
@@ -36,23 +48,23 @@ async function visitHtml(directory) {
 }
 
 export async function applyCspToExport(directory = "out") {
+  if (process.env.NEXT_PUBLIC_DISABLE_CSP === "1") return;
+
   const htmlFiles = await visitHtml(directory);
   if (htmlFiles.length === 0) {
     throw new Error(`No exported HTML files found in ${directory}.`);
   }
 
-  // Static fixtures copied into the export (embed/test.html) are not rendered
-  // through the root layout, so they carry no marker; skip those. If nothing
-  // carries the marker, the layout lost its CSP tag and the build must fail.
+  // Static fixtures copied into the export are not Next pages and need no CSP.
   let stamped = 0;
   for (const file of htmlFiles) {
     const html = await readFile(file, "utf8");
-    if (!html.includes(CSP_MARKER)) continue;
+    if (!html.includes("/_next/static/")) continue;
     await writeFile(file, withInlineScriptHashes(html));
     stamped += 1;
   }
   if (stamped === 0) {
-    throw new Error("CSP hash marker was not found in exported HTML.");
+    throw new Error("No Next.js exported pages found to apply the CSP.");
   }
 }
 
